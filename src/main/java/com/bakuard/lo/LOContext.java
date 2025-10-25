@@ -13,12 +13,16 @@ import com.sun.star.lang.XMultiComponentFactory;
 import com.sun.star.lib.uno.helper.UnoUrl;
 import com.sun.star.uno.UnoRuntime;
 import com.sun.star.uno.XComponentContext;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.util.concurrent.TimeUnit;
 
-public class LibreOfficeContext {
+public class LOContext {
 
-	private final LibreOfficeProcess officeProcess;
+	private static final Logger logger = LoggerFactory.getLogger(LOContext.class.getName());
+
+	private final LOProcess officeProcess;
 
 	private final String unoUrlAsString;
 	private final UnoUrl unoUrl;
@@ -33,47 +37,43 @@ public class LibreOfficeContext {
 	private XDispatchProvider dispatchProvider;
 	private XComponent currentDocument;
 
-	public LibreOfficeContext(LibreOfficeProcess officeProcess) {
+	public LOContext(LOProcess officeProcess) {
 		this.officeProcess = officeProcess;
 		this.unoUrlAsString = String.format("socket,host=127.0.0.1,port=%d,tcpNoDelay=1", officeProcess.getPort());
 		this.unoUrl = getUnoUrl(unoUrlAsString);
 	}
 
 	/*
-	 * Процесс LibreOffice не сразу готов принимать соединения после своего запуска. Если
-	 * не получилось сразу соединиться, нужно подождать некоторое время, а затем попробовать снова.
-	 * (Этот подход был взят из библиотеки JODConverter).
-	 */
+	* The LibreOffice process is not immediately ready to accept connections after it starts.
+	* If the connection attempt fails at first, you should wait for a short while and then try again.
+	* (This approach was taken from the JODConverter library.)
+	*/
 	public void connectOfficeProcess(int attemptNumber) {
-		Exception officeConnectException = null;
-
 		for(int i = 0; i < attemptNumber; i++) {
 			try {
-				connectOfficeProcess();
+				officeProcess.waitOffice(1, TimeUnit.SECONDS);
+
+				connect();
+				initializeCompFactoryAndComponentContext();
+				initializeDesktop();
+
+				logger.info("LibreOffice process connection established");
 				return;
+			} catch(ProcessUnavailableException e) {
+				throw e;
 			} catch(Exception e) {
-				System.out.println("Fail to connect to LibreOffice. Attempt " + (i + 1) + "/" + attemptNumber);
-				officeConnectException = e;
+				logger.debug("Fail to connect to LibreOffice. Attempt {}/{}. Reason: {}", i + 1, attemptNumber, e.getMessage());
 			}
 		}
 
-		throw new RuntimeException("Fail to connect to LibreOffice process.", officeConnectException);
-	}
-
-	private void connectOfficeProcess() throws Exception {
-		officeProcess.waitOffice(1, TimeUnit.SECONDS);
-
-		connect();
-		initializeCompFactoryAndComponentContext();
-		initializeDesktop();
-
-		System.out.println("LibreOffice process connection established on port " + officeProcess.getPort());
+		throw new ProcessUnavailableException("Failed to connect to LibreOffice process after " + attemptNumber + " attempts.");
 	}
 
 	public void closeConnection() {
 		if(bridge != null) {
 			XComponent bridgeComp = UnoRuntime.queryInterface(XComponent.class, bridge);
 			bridgeComp.dispose();
+			logger.info("Connection with LibreOffice process was closed.");
 		}
 	}
 
@@ -89,10 +89,6 @@ public class LibreOfficeContext {
 		return dispatchProvider;
 	}
 
-	public XComponent getCurrentDocument() {
-		return currentDocument;
-	}
-
 	public void refreshCurrentFrame() {
 		XFrame frame = desktopInterface.getCurrentFrame();
 		dispatchProvider = UnoRuntime.queryInterface(XDispatchProvider.class, frame);
@@ -101,6 +97,11 @@ public class LibreOfficeContext {
 	public void setCurrentDocument(XComponent currentDocument) {
 		this.currentDocument = currentDocument;
 	}
+
+	public XComponent getCurrentDocument() {
+		return currentDocument;
+	}
+
 
 	private void connect() throws Exception {
 		XComponentContext context = Bootstrap.createInitialComponentContext(null);
